@@ -12,7 +12,6 @@ import docx
 from openpyxl import load_workbook
 import google.generativeai as genai
 from dotenv import load_dotenv
-
 from cdp_utils import aggregate_transactional_features, apply_final_scoring
 from dashboard import render_dashboard
 load_dotenv(dotenv_path=".env")
@@ -308,16 +307,16 @@ with tab1:
             )
         except Exception as e:
             set_step_status("Build Output", "fail")
-            st.error(f"⚠️ Building output failed: {e}")
+            st.error(f"Building output failed: {e}")
     else:
         st.info("Upload a CSV to begin.")
+
 # ------------------------------
-# Tab 2: Signal Analysis & Reasoning
+# Tab 2: Signal Analysis & Reasoning (clean UI, partner summary + AI)
 # ------------------------------
 with tab2:
-    st.header("🔍 Signal Analysis & Reasoning")
+    st.header("Signal Analysis & Reasoning")
 
-    # Ensure predictions exist
     if 'prediction_results' not in st.session_state or st.session_state['prediction_results'] is None:
         st.info("Please run predictions in the Prediction tab first.")
     else:
@@ -325,105 +324,31 @@ with tab2:
         if results.empty:
             st.info("No prediction results found. Please run the Prediction tab.")
         else:
-            # prefer final columns if available
             score_col = "Final Score" if "Final Score" in results.columns else "Predicted Score"
             signal_col = "Final Signal" if "Final Signal" in results.columns else "Predicted Signal"
 
-            # partner selector
             partner_list = results['Partner_Code'].tolist() if 'Partner_Code' in results.columns else results.index.astype(str).tolist()
             selected_partner = st.selectbox("Select Partner for Analysis", partner_list)
 
-            def _get_partner_row(results_df, partner_code):
-                """Return partner row Series (robust)."""
-                try:
-                    return results_df[results_df['Partner_Code'] == partner_code].iloc[0]
-                except Exception:
-                    # fallback: try index match
-                    try:
-                        idx = results_df.index[results_df.index.astype(str) == partner_code][0]
-                        return results_df.loc[idx]
-                    except Exception:
-                        return results_df.iloc[0]
-
-            def _get_partner_kpis(feats_df, partner_code):
-                """Return partner-level KPI Series if available, else empty Series."""
-                if feats_df is None:
-                    return pd.Series(dtype="float64")
-                try:
-                    if 'Partner_Code' in feats_df.columns:
-                        tmp = feats_df[feats_df['Partner_Code'] == partner_code]
-                        if not tmp.empty:
-                            return tmp.iloc[0]
-                    # otherwise assume feats_df is indexed in same order as results; attempt ordinal alignment
-                    try:
-                        ridx = results[results['Partner_Code'] == partner_code].index[0]
-                        return feats_df.reset_index(drop=True).iloc[ridx]
-                    except Exception:
-                        return pd.Series(dtype="float64")
-                except Exception:
-                    return pd.Series(dtype="float64")
-
-            def _get_model_input_row():
-                """
-                Try a few common session_state keys for raw model input rows.
-                If you stored original input under a name, add it here.
-                """
-                for key in ("raw_input", "input_raw", "cdp_input", "input_features_raw"):
-                    if key in st.session_state and st.session_state[key] is not None:
-                        df = st.session_state[key]
-                        # try to match by Partner_Code
-                        try:
-                            if 'Partner_Code' in df.columns:
-                                tmp = df[df['Partner_Code'] == selected_partner]
-                                if not tmp.empty:
-                                    return tmp.iloc[0]
-                        except Exception:
-                            pass
-                return pd.Series(dtype="float64")
-
-            # When user clicks analyze
-            if st.button("🔍 Analyze Signal Reasoning"):
+            if st.button("Analyze Signal Reasoning"):
                 with st.spinner("Analyzing signal reasoning..."):
                     try:
-                        prow = _get_partner_row(results, selected_partner)
-                        kpis = _get_partner_kpis(st.session_state.get('input_features'), selected_partner)
-                        model_input = _get_model_input_row()
+                        prow = results[results['Partner_Code'] == selected_partner].iloc[0]
 
-                        # choose KPI keys to include (order matters: highest value to show abnormal signals)
-                        candidate_kpis = [
-                            "avg_days_past_due","max_days_past_due","late_ratio",
-                            "dispute_ratio","adjustment_ratio","allocation_ratio","collection_rate",
-                            "total_invoices","total_installments","total_invoice_amount",
-                        ]
-                        # filter to existing columns and present values
-                        kpi_lines = []
-                        for k in candidate_kpis:
-                            if k in kpis.index:
-                                val = kpis.get(k)
-                                kpi_lines.append(f"- {k}: {val}")
-                        if not kpi_lines:
-                            kpi_lines = ["- (No transactional KPI snapshot available)"]
+                        # Partner Summary
+                        st.subheader("Partner Summary")
+                        st.metric("Partner Code", selected_partner)
+                        fs_val = prow.get("Final Score", prow.get("Predicted Score", None))
+                        st.metric("Final Score", f"{fs_val:.2f}" if fs_val is not None else "N/A")
+                        sig_val = prow.get("Final Signal", prow.get("Predicted Signal", "N/A"))
+                        st.metric("Final Signal", sig_val)
 
-                        # also include top model input numeric features (if available)
-                        input_lines = []
-                        if isinstance(model_input, pd.Series) and not model_input.empty:
-                            try:
-                                numeric_input = pd.to_numeric(model_input, errors="coerce").dropna()
-                                if not numeric_input.empty:
-                                    top_input = numeric_input.abs().nlargest(6)
-                                    for nm, v in top_input.items():
-                                        input_lines.append(f"- {nm}: {v}")
-                            except Exception:
-                                pass
-                        if not input_lines:
-                            input_lines = ["- (No raw CDP input snapshot available)"]
-
-                        # Build compact prompt
-                        final_score_str = f"{prow.get('Final Score', prow.get('Predicted Score', 'N/A')):.2f}" if pd.notna(prow.get('Final Score', prow.get('Predicted Score', np.nan))) else "N/A"
-                        final_signal_str = prow.get('Final Signal', prow.get('Predicted Signal', 'N/A'))
+                        # Build AI prompt
+                        final_score_str = f"{fs_val:.2f}" if fs_val is not None else "N/A"
+                        final_signal_str = sig_val
 
                         prompt = f"""
-You are a senior credit risk analyst. Provide a short, structured analysis for Partner {selected_partner}.
+You are a senior credit risk analyst. Provide a structured, actionable analysis for Partner {selected_partner}.
 
 Context:
 - Final Score: {final_score_str}
@@ -433,103 +358,55 @@ Context:
 - Override reason: {prow.get('OverrideReason', 'None')}
 - Adjustment delta: {prow.get('AdjustmentDelta', 'N/A')}
 
-Top transactional KPIs (most relevant):
-{chr(10).join(kpi_lines)}
-
-Top raw CDP input features (recent / largest):
-{chr(10).join(input_lines)}
-
 Requirements:
-1) Header: Top 3 Key Factors (bullets).
-2) Risk Assessment: 1-2 sentences explaining likelihood / urgency.
-3) Recommendation: Approve / Review / Decline with one-line justification.
-4) Quick Action Plan: 3 prioritized steps (1 line each).
-
-Return only Markdown with headings and bullets and keep it concise (max 200-300 words).
+1) Key Factors (3 bullets).
+2) Risk Assessment (1–2 sentences).
+3) Recommendation (approve / review / decline) with justification.
+4) Quick Action Plan (3 steps).
 """
 
-                        # Call AI if available
-                        if analyze_with_gemini is None:
-                            ai_text = "AI analysis not configured in this environment."
-                        else:
-                            try:
-                                ai_text = analyze_with_gemini(prompt)
-                            except Exception as e:
-                                ai_text = f"Error calling AI: {e}"
-
-                        # UI rendering
-                        col1, col2 = st.columns([1,1])
-                        with col1:
-                            st.subheader("Partner Summary")
-                            st.metric("Partner Code", selected_partner)
-                            fs_val = prow.get("Final Score", prow.get("Predicted Score", np.nan))
-                            st.metric("Final Score", f"{fs_val:.2f}" if pd.notna(fs_val) else "N/A")
-                            sig_val = prow.get("Final Signal", prow.get("Predicted Signal", "N/A"))
-                            signal_color = {'Green': '🟢', 'Yellow': '🟡', 'Red': '🔴'}
-                            st.metric("Final Signal", f"{signal_color.get(sig_val,'⚪')} {sig_val}")
-                            # small KPI snippet
-                            st.markdown("**Top transactional KPIs (snapshot)**")
-                            for line in kpi_lines[:6]:
-                                st.write(line)
-
-                        with col2:
-                            st.subheader(" Top Model Input Features")
-                            for line in input_lines[:6]:
-                                st.write(line)
-
-                        st.markdown("###  AI Analysis")
+                        ai_text = analyze_with_gemini(prompt) if analyze_with_gemini is not None else "AI analysis not configured."
+                        st.subheader("AI Analysis")
                         st.markdown(ai_text)
 
                     except Exception as e:
                         st.error(f"Error while preparing analysis: {e}")
 
-            # Batch analysis option (careful: may incur API calls)
+
+            # Batch analysis option (kept but confirm to avoid accidental API calls)
             st.markdown("---")
             st.subheader("Batch Analysis")
             confirm_batch = st.checkbox("I understand this will call the AI for each partner and may incur costs.")
-            run_batch = st.button(" Analyze All Red/Yellow Signals")
-            if run_batch:
+            if st.button(" Analyze All Red/Yellow Signals"):
                 if not confirm_batch:
-                    st.info("Please confirm the checkbox before running batch analysis.")
-                
+                    st.info("Please check the confirmation checkbox before running batch analysis.")
                 else:
-                    signal_col = "Final Signal" if "Final Signal" in results.columns else "Predicted Signal"
-                    score_col = "Final Score" if "Final Score" in results.columns else "Predicted Score"
-                    high_risk = results[results[signal_col].isin(['Red','Yellow'])]
+                    signal_col_local = "Final Signal" if "Final Signal" in results.columns else "Predicted Signal"
+                    score_col_local = "Final Score" if "Final Score" in results.columns else "Predicted Score"
+                    high_risk = results[results[signal_col_local].isin(['Red','Yellow'])]
                     if high_risk.empty:
                         st.info("No Red/Yellow partners found.")
                     else:
                         progress = st.progress(0)
-                        batch_out = []
+                        out = []
                         for i, (_, partner) in enumerate(high_risk.iterrows()):
                             try:
                                 partner_code = partner.get('Partner_Code', str(partner.name))
                                 prow = _get_partner_row(results, partner_code)
                                 kpis = _get_partner_kpis(st.session_state.get('input_features'), partner_code)
-                                # build short prompt (reuse same logic, but minimal to save tokens)
-                                kp_lines = []
+                                kp_list = []
                                 for k in ["late_ratio","avg_days_past_due","max_days_past_due","dispute_ratio","collection_rate"]:
                                     if k in kpis.index:
-                                        kp_lines.append(f"- {k}: {kpis.get(k)}")
-                                if not kp_lines:
-                                    kp_lines = ["- (no kpi)"]
-                                prompt = f"Partner {partner_code} | Signal: {prow.get(signal_col)} | Score: {prow.get(score_col)}\nTop KPIs:\n" + "\n".join(kp_lines) + "\nProvide 3 bullets: primary risk, secondary concern, recommended action. Keep each <25 words."
+                                        kp_list.append(f"{k}: {kpis.get(k)}")
+                                kp_text = "\n".join(kp_list) if kp_list else "(no kpi)"
+                                prompt = f"Partner {partner_code} | Signal: {prow.get(signal_col_local)} | Score: {prow.get(score_col_local)}\nTop KPIs:\n{kp_text}\nProvide 3 bullets: primary risk, secondary concern, recommended action. Keep each <25 words."
                                 ai_resp = analyze_with_gemini(prompt)
-                                batch_out.append({
-                                    "Partner_Code": partner_code,
-                                    "Signal": prow.get(signal_col),
-                                    "Score": prow.get(score_col),
-                                    "Analysis": ai_resp if isinstance(ai_resp, str) else str(ai_resp)
-                                })
+                                out.append({"Partner_Code": partner_code, "Signal": prow.get(signal_col_local), "Score": prow.get(score_col_local), "Analysis": ai_resp})
                             except Exception as e:
-                                batch_out.append({
-                                    "Partner_Code": partner.get("Partner_Code", str(partner.name)),
-                                    "Signal": partner.get(signal_col),
-                                    "Score": partner.get(score_col),
-                                    "Analysis": f"Error: {e}"
-                                })
+                                out.append({"Partner_Code": partner.get("Partner_Code", str(partner.name)), "Signal": partner.get(signal_col_local), "Score": partner.get(score_col_local), "Analysis": f"Error: {e}"})
                             progress.progress((i+1)/len(high_risk))
-                        st.dataframe(pd.DataFrame(batch_out), use_container_width=True)
+                        st.dataframe(pd.DataFrame(out), use_container_width=True)
+
 
 
 with tab3:

@@ -71,7 +71,7 @@ def render_dashboard(
     - If no predictions provided and use_upload=False, dashboard simply explains how to get results.
     """
 
-    st.header("📊 Dynamic Dashboard")
+    st.header("Dynamic Dashboard")
 
     results = None
     features = None
@@ -128,9 +128,9 @@ def render_dashboard(
         red = counts.get('Red', 0)
         mean_score = results[score_col].mean() if score_col in results.columns else np.nan
 
-        c1.metric("🟢 Green (Safe)", f"{int(green)}")
-        c2.metric("🟡 Yellow (Watchlist)", f"{int(yellow)}")
-        c3.metric("🔴 Red (High Risk)", f"{int(red)}")
+        c1.metric(" Green (Safe)", f"{int(green)}")
+        c2.metric("Yellow (Watchlist)", f"{int(yellow)}")
+        c3.metric("Red (High Risk)", f"{int(red)}")
         c4.metric("Mean Score", f"{mean_score:.2f}" if not np.isnan(mean_score) else "N/A")
         st.markdown("---")
 
@@ -197,7 +197,7 @@ def render_dashboard(
         st.markdown("---")
 
     # ---------- Top risky / safe ----------
-        # ---------- Top risky / safe ----------
+        
     if show("Top Partners"):
         st.subheader("Top risky / safe partners")
         top_n = st.number_input("Top N entries", min_value=1, max_value=100, value=10)
@@ -284,7 +284,7 @@ def render_dashboard(
 
         if analyze_fn is not None:
             tone = st.selectbox("Tone of AI response", ["Concise","Analytical","Actionable"], index=2)
-            if st.button("🧠 Get AI insight for selected partner"):
+            if st.button(" Get AI insight for selected partner"):
                 with st.spinner("Calling AI..."):
                     feat_text = ""
                     try:

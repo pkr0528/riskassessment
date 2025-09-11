@@ -6,3 +6,4 @@ python-docx
 openpyxl
 google-generativeai
 numpy
+joblib
