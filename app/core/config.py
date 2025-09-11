@@ -17,18 +17,18 @@ class Settings(BaseSettings):
 
     # Datasets
     TRANSACTIONAL_DATASET: str = os.getenv(
-        "TRANSACTIONAL_DATASET", "partner_transactional_dataset.csv"
+        "TRANSACTIONAL_DATASET", "data/partner_transactional_dataset.csv"
     )
 
     # Model Paths
     REGRESSION_MODEL_PATH: str = os.getenv(
-        "REGRESSION_MODEL_PATH", "models/regression_model.pkl"
+        "REGRESSION_MODEL_PATH", "data/regression_model.pkl"
     )
     SIGNAL_CLASSIFICATION_MODEL_PATH: str = os.getenv(
-        "SIGNAL_CLASSIFICATION_MODEL_PATH", "models/classification_model.pkl"
+        "SIGNAL_CLASSIFICATION_MODEL_PATH", "data/signal_classification_model.pkl"
     )
     STANDARD_SCALER_MODEL_PATH: str = os.getenv(
-        "STANDARD_SCALER_MODEL_PATH", "models/scaler.pkl"
+        "STANDARD_SCALER_MODEL_PATH", "data/standard_scaler_model.pkl"
     )
 
     # Application settings
