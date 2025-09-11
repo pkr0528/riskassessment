@@ -75,7 +75,7 @@ jobs:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
-          name: risk-assessor-streamlit-${{ github.sha }}
+          name: risk-assessment
 
       - name: "Deploy to Azure Web App"
         uses: azure/webapps-deploy@v3
