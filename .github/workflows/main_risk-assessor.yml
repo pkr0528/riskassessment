@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -28,30 +28,55 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-      
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-        
-      # Optional: Add step to run tests here (PyTest, Django test suites, etc.)
+          echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
+          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
+
+      - name: Upgrade pip and install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Collect static files (if needed)
+        run: |
+          # Add any build steps here if needed
+          echo "Build completed"
+
+      # Optional: Add step to run tests here
+      - name: Run tests (optional)
+        run: |
+          # pip install pytest
+          # pytest
+          echo "Tests skipped for now"
+
+      - name: Create startup script
+        run: |
+          echo '#!/bin/bash' > startup.sh
+          echo 'python -m streamlit run app/main.py --server.port 8000 --server.address 0.0.0.0 --server.headless true' >> startup.sh
+          chmod +x startup.sh
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
-          name: python-app
+          name: risk-assessment
           path: |
             .
             !venv/
+            !.git/
+            !.github/
+            !.pytest_cache/
+            !__pycache__/
 
   deploy:
     runs-on: ubuntu-latest
     needs: build
-    
+    environment: production
+
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
-          name: python-app
-      
+          name: risk-assessment
+
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
@@ -59,3 +84,11 @@ jobs:
           app-name: 'risk-assessor'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B6F7DB93FA46441EB39D5E78098ECDCC }}
+          package: .
+
+      - name: 'Set startup command'
+        uses: azure/CLI@v1
+        with:
+          azcliversion: 2.30.0
+          inlineScript: |
+            az webapp config set --resource-group YOUR_RESOURCE_GROUP --name risk-assessor --startup-file "python -m streamlit run app/main.py --server.port 8000 --server.address 0.0.0.0 --server.headless true"
