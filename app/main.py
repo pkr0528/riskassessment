@@ -399,7 +399,7 @@ with tab1:
                 apply_final_scoring,
             )
 
-            txn_df = pd.read_csv("partner_transactional_dataset.csv")
+            txn_df = pd.read_csv(settings.TRANSACTIONAL_DATASET)
             agg_df = aggregate_transactional_features(
                 txn_df, partner_col="Partner_Code"
             )

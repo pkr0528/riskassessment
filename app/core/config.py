@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     gemini_model = os.getenv("GEMINI_MODEL")
     is_gemini_available = False
 
+    # Datasets
+    TRANSACTIONAL_DATASET = os.getenv("TRANSACTIONAL_DATASET")
+
     # Models
     REGRESSION_MODEL_PATH = os.getenv("REGRESSION_MODEL_PATH")
     SIGNAL_CLASSIFICATION_MODEL_PATH = os.getenv("SIGNAL_CLASSIFICATION_MODEL_PATH")
