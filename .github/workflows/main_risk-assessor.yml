@@ -91,4 +91,4 @@ jobs:
         with:
           azcliversion: 2.30.0
           inlineScript: |
-            az webapp config set --resource-group YOUR_RESOURCE_GROUP --name risk-assessor --startup-file "python -m streamlit run app/main.py --server.port 8000 --server.address 0.0.0.0 --server.headless true"
+            az webapp config set --resource-group assets-free --name risk-assessor --startup-file "python -m streamlit run app/main.py --server.port 8000 --server.address 0.0.0.0 --server.headless true"
