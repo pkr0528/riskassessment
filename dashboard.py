@@ -8,6 +8,8 @@ import joblib
 import pickle
 import plotly.express as px
 import plotly.graph_objects as go
+from cdp_utils import aggregate_transactional_features, apply_final_scoring
+
 
 # ---------- Utility / model loading ----------
 def try_load_model(path: str):
@@ -87,46 +89,22 @@ def render_dashboard(
         results = prediction_results.copy()
         features = input_features.copy() if input_features is not None else None
 
-    # 2) If not passed and uploader is enabled & user uploaded file: compute or use present prediction cols
+    # If nothing passed and uploader is enabled
     if (results is None or results.empty) and use_upload and uploaded is not None:
         df_raw = pd.read_csv(uploaded)
-        # if predictions already present
-        if 'Predicted Score' in df_raw.columns and 'Predicted Signal' in df_raw.columns:
-            results = df_raw.copy()
-            features = df_raw.drop(columns=['Partner_Code','Predicted Score','Predicted Signal'], errors='ignore')
-        else:
-            # try local model prediction
-            reg, clf, scl = load_disk_models()
-            if reg is None or clf is None:
-                st.warning("Local models not found. Showing uploaded raw data.")
-                results = df_raw.copy()
-            else:
-                feats = df_raw.drop(columns=['Partner_Code'], errors='ignore')
-                feats_p = preprocess_features(feats)
-                try:
-                    pred_score, pred_signal_raw, labels = predict_with_models(reg, clf, scl, feats_p)
-                    id_cols = df_raw[['Partner_Code']] if 'Partner_Code' in df_raw.columns else pd.DataFrame(index=feats_p.index)
-                    results = id_cols.copy()
-                    results['Predicted Score'] = pred_score
-                    results['Predicted Signal'] = labels
-                    features = feats_p
-                    st.success("Predictions computed using local models.")
-                except Exception as e:
-                    st.error(f"Prediction failed: {e}")
-                    results = df_raw.copy()
+        results = df_raw.copy()
 
-    # If still nothing, guide the user (but do not show uploader if use_upload=False)
     if results is None or results.empty:
-        if use_upload:
-            st.info("Upload a cleaned CSV (Partner_Code + features) or pass prediction_results from Tab 1.")
-        else:
-            st.info("No prediction results available. Run Tab 1 prediction or call render_dashboard with prediction_results and input_features.")
+        st.info("No prediction results available. Run Tab 1 prediction or pass prediction_results.")
         return
 
-    # normalize
     results = results.reset_index(drop=True)
 
-    # ----------- SECTION SELECTOR (single dropdown) -----------
+    # ✅ Always prefer Final columns if available
+    score_col = "Final Score" 
+    signal_col = "Final Signal"
+
+    # ----------- SECTION SELECTOR -----------
     section_options = [
         "All",
         "Key Insights",
@@ -137,7 +115,6 @@ def render_dashboard(
     ]
     selected_section = st.selectbox("Choose dashboard section to view", options=section_options, index=0)
 
-    # helper to check if we should render a given section
     def show(section_name: str) -> bool:
         return selected_section == "All" or selected_section == section_name
 
@@ -145,11 +122,11 @@ def render_dashboard(
     if show("Key Insights"):
         st.subheader("Key Insights")
         c1, c2, c3, c4 = st.columns(4)
-        counts = results['Predicted Signal'].value_counts().to_dict() if 'Predicted Signal' in results.columns else {}
+        counts = results[signal_col].value_counts().to_dict() if signal_col in results.columns else {}
         green = counts.get('Green', 0)
         yellow = counts.get('Yellow', 0)
         red = counts.get('Red', 0)
-        mean_score = results['Predicted Score'].mean() if 'Predicted Score' in results.columns else np.nan
+        mean_score = results[score_col].mean() if score_col in results.columns else np.nan
 
         c1.metric("🟢 Green (Safe)", f"{int(green)}")
         c2.metric("🟡 Yellow (Watchlist)", f"{int(yellow)}")
@@ -164,60 +141,54 @@ def render_dashboard(
 
         with control_col:
             st.markdown("**Filters**")
-            if 'Predicted Score' in results.columns:
-                min_val = float(results['Predicted Score'].min())
-                max_val = float(results['Predicted Score'].max())
+            if score_col in results.columns:
+                min_val = float(results[score_col].min())
+                max_val = float(results[score_col].max())
                 score_range = st.slider("Score range", min_value=0.0, max_value=100.0, value=(min_val, max_val))
             else:
                 score_range = (0.0, 100.0)
 
-            avail_signals = sorted(results['Predicted Signal'].unique()) if 'Predicted Signal' in results.columns else []
+            avail_signals = sorted(results[signal_col].unique()) if signal_col in results.columns else []
             selected_signals = st.multiselect("Signals", options=avail_signals, default=avail_signals)
             show_labels = st.checkbox("Show partner codes on points", value=False)
 
         viz_df = results.copy()
-        if 'Predicted Score' in viz_df.columns:
-            viz_df = viz_df[(viz_df['Predicted Score'] >= score_range[0]) & (viz_df['Predicted Score'] <= score_range[1])]
-        if 'Predicted Signal' in viz_df.columns and selected_signals:
-            viz_df = viz_df[viz_df['Predicted Signal'].isin(selected_signals)]
+        if score_col in viz_df.columns:
+            viz_df = viz_df[(viz_df[score_col] >= score_range[0]) & (viz_df[score_col] <= score_range[1])]
+        if signal_col in viz_df.columns and selected_signals:
+            viz_df = viz_df[viz_df[signal_col].isin(selected_signals)]
 
         with viz_col:
-            # Box plot by signal (no histogram)
-            if 'Predicted Score' in viz_df.columns and 'Predicted Signal' in viz_df.columns:
+            if score_col in viz_df.columns and signal_col in viz_df.columns:
                 fig_box = go.Figure()
-                # add boxes for signals present (order stable)
                 for sig, color in [("Green","#22C55E"), ("Yellow","#F59E0B"), ("Red","#EF4444")]:
-                    subset = viz_df[viz_df['Predicted Signal']==sig]
-                    if subset.empty:
-                        continue
+                    subset = viz_df[viz_df[signal_col]==sig]
+                    if subset.empty: continue
                     fig_box.add_trace(go.Box(
-                        y=subset['Predicted Score'],
+                        y=subset[score_col],
                         name=sig,
                         marker_color=color,
                         boxmean="sd",
-                        boxpoints="all",   # show points
+                        boxpoints="all",
                         hovertemplate="Signal: %{name}<br>Score: %{y:.2f}<extra></extra>"
                     ))
-
-                # optional text labels overlay
                 if show_labels and 'Partner_Code' in viz_df.columns:
                     fig_box.add_trace(go.Scatter(
-                        x=viz_df['Predicted Signal'],
-                        y=viz_df['Predicted Score'],
+                        x=viz_df[signal_col],
+                        y=viz_df[score_col],
                         mode='text',
                         text=viz_df['Partner_Code'].astype(str),
                         textposition='top center',
                         hoverinfo='skip',
                         showlegend=False
                     ))
-
-                fig_box.update_layout(title="Score distribution by Signal (box + points)", yaxis_title="Predicted Score")
+                fig_box.update_layout(title="Score distribution by Signal", yaxis_title=score_col)
                 st.plotly_chart(fig_box, use_container_width=True)
 
-            # Pie chart for signal share
-            if 'Predicted Signal' in viz_df.columns:
-                pie_df = viz_df['Predicted Signal'].value_counts().reset_index()
+            if signal_col in viz_df.columns:
+                pie_df = viz_df[signal_col].value_counts().reset_index()
                 pie_df.columns = ['Signal','Count']
+                import plotly.express as px
                 fig_pie = px.pie(pie_df, names='Signal', values='Count', title="Signal Share",
                                  hole=0.4,
                                  color='Signal',
@@ -226,19 +197,55 @@ def render_dashboard(
         st.markdown("---")
 
     # ---------- Top risky / safe ----------
+        # ---------- Top risky / safe ----------
     if show("Top Partners"):
         st.subheader("Top risky / safe partners")
         top_n = st.number_input("Top N entries", min_value=1, max_value=100, value=10)
 
-        if 'Predicted Signal' in results.columns and 'Predicted Score' in results.columns:
-            top_risk = results[results['Predicted Signal']=='Red'].sort_values('Predicted Score').head(top_n)
-            top_safe = results[results['Predicted Signal']=='Green'].sort_values('Predicted Score', ascending=False).head(top_n)
-        elif 'Predicted Score' in results.columns:
-            top_risk = results.sort_values('Predicted Score').head(top_n)
-            top_safe = results.sort_values('Predicted Score', ascending=False).head(top_n)
+        # columns we want to display (prefer Final, fallback to Predicted)
+        display_cols = ["Partner_Code", score_col, signal_col]  # score_col and signal_col already set to Final*
+
+        # Ensure the columns exist in results; if not, fallback to predicted
+        missing = [c for c in display_cols if c not in results.columns]
+        if missing:
+            # try fallback to predicted columns if final not present
+            fallback_score = "Predicted Score"
+            fallback_signal = "Predicted Signal"
+            if fallback_score in results.columns and fallback_signal in results.columns:
+                display_cols = ["Partner_Code", fallback_score, fallback_signal]
+                st.warning(f"Final Score/Signal not found — showing {fallback_score}/{fallback_signal} instead.")
+            else:
+                # last resort: show Partner_Code and whatever numeric score exists
+                available_score = None
+                for candidate in ["Final Score","Predicted Score","PredictedScore"]:
+                    if candidate in results.columns:
+                        available_score = candidate
+                        break
+                available_signal = None
+                for candidate in ["Final Signal","Predicted Signal"]:
+                    if candidate in results.columns:
+                        available_signal = candidate
+                        break
+                display_cols = ["Partner_Code"]
+                if available_score: display_cols.append(available_score)
+                if available_signal: display_cols.append(available_signal)
+                st.warning("Showing best-available columns: " + ", ".join(display_cols[1:] or ["(none)"]))
+
+        # Compute top risky / safe based on score column if available
+        score_for_sort = None
+        for cand in [score_col, "Predicted Score", "Final Score", "PredictedScore"]:
+            if cand in results.columns:
+                score_for_sort = cand
+                break
+
+        if score_for_sort is not None:
+            # lower score = riskier (Final Score higher == safer). Keep same logic.
+            top_risk = results.sort_values(score_for_sort).head(top_n)[display_cols]
+            top_safe = results.sort_values(score_for_sort, ascending=False).head(top_n)[display_cols]
         else:
-            top_risk = results.head(top_n)
-            top_safe = results.head(top_n)
+            # no numeric score available: just pick top N rows
+            top_risk = results.head(top_n)[display_cols]
+            top_safe = results.head(top_n)[display_cols]
 
         c1, c2 = st.columns(2)
         with c1:
@@ -249,33 +256,32 @@ def render_dashboard(
             st.dataframe(top_safe.reset_index(drop=True), use_container_width=True)
         st.markdown("---")
 
+
     # ---------- Inspect partner & AI insight ----------
     if show("Inspect & AI Insight"):
         st.subheader("Inspect partner & get AI insight")
         partner_list = results['Partner_Code'].tolist() if 'Partner_Code' in results.columns else list(results.index.astype(str))
         chosen = st.selectbox("Choose partner", partner_list)
 
-        prow = None
         try:
             prow = results[results['Partner_Code']==chosen].iloc[0]
-            score_display = f"{prow.get('Predicted Score','N/A'):.2f}" if 'Predicted Score' in results.columns else "N/A"
-            st.markdown(f"**{chosen}** — Score: **{score_display}** — Signal: **{prow.get('Predicted Signal','N/A')}**")
+            score_display = f"{prow.get(score_col,'N/A'):.2f}" if score_col in results.columns else "N/A"
+            st.markdown(f"**{chosen}** — Score: **{score_display}** — Signal: **{prow.get(signal_col,'N/A')}**")
         except Exception:
             st.write("Partner row not found or missing columns.")
 
-        # show feature snippet if available
         feats_src = input_features if input_features is not None else features
         if feats_src is not None:
             try:
                 idx = results[results['Partner_Code']==chosen].index[0]
                 frecord = feats_src.reset_index(drop=True).iloc[idx]
                 st.markdown("**Top features for this partner**")
-                for f,v in frecord.abs().nlargest(6).items():
+                numeric_feats = pd.to_numeric(frecord, errors="coerce").dropna()
+                for f,v in numeric_feats.abs().nlargest(6).items():
                     st.write(f"- **{f}**: {v:.3f}")
             except Exception:
                 pass
 
-        # AI insight enriched prompt
         if analyze_fn is not None:
             tone = st.selectbox("Tone of AI response", ["Concise","Analytical","Actionable"], index=2)
             if st.button("🧠 Get AI insight for selected partner"):
@@ -289,8 +295,8 @@ def render_dashboard(
                         feat_text = ""
 
                     prompt = f"""You are a senior credit risk analyst. Provide a structured, actionable analysis for Partner {chosen}.
-- Predicted Score: {prow.get('Predicted Score','N/A')}
-- Predicted Signal: {prow.get('Predicted Signal','N/A')}
+- {score_col}: {prow.get(score_col,'N/A')}
+- {signal_col}: {prow.get(signal_col,'N/A')}
 Partner features snapshot:
 {feat_text if feat_text else 'None'}
 
@@ -317,5 +323,3 @@ Format with headings and bullets. Tone: {tone}
         except Exception:
             download_df = results
         st.download_button("Download filtered results (CSV)", data=download_df.to_csv(index=False), file_name="dashboard_results.csv")
-
-    

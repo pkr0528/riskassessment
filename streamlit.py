@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,10 +11,11 @@ from pathlib import Path
 import docx
 from openpyxl import load_workbook
 import google.generativeai as genai
-import subprocess
-from dashboard import render_dashboard
 from dotenv import load_dotenv
-load_dotenv()
+
+from cdp_utils import aggregate_transactional_features, apply_final_scoring
+from dashboard import render_dashboard
+load_dotenv(dotenv_path=".env")
 st.set_page_config(page_title="CDP Score & Signal Predictor", layout="wide")
 
 # =========================
@@ -51,37 +53,33 @@ def read_xlsx(file_path):
         st.error(f"Error reading XLSX: {e}")
         return ""
  #gemini integration
-try:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-    else:
-        GEMINI_API_KEY = None
-except Exception as e:
-    st.error(f"Error configuring Gemini API: {e}")
-    GEMINI_API_KEY = None
+ENV_GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+if ENV_GEMINI_KEY:
+    try:
+        genai.configure(api_key=ENV_GEMINI_KEY)
+        _GEMINI_AVAILABLE = True
+    except Exception as e:
+        st.error(f"Failed to configure Gemini API: {e}")
+        _GEMINI_AVAILABLE = False
+else:
+    _GEMINI_AVAILABLE = False
 
 def analyze_with_gemini(prompt: str, model_name: str = "gemini-2.5-flash", max_output_tokens: int = 1024) -> str:
-
     """
-
-    Call Gemini using the environment-configured key and return plain text.
-
-    If an error occurs, returns string starting with 'Error'.
-
+    Safe wrapper for calling Gemini.
+    - If GEMINI_API_KEY not set, return friendly message.
+    - Otherwise call Gemini and return text.
     """
+    if not _GEMINI_AVAILABLE:
+        return "AI not configured. Please set GEMINI_API_KEY in your environment."
 
     try:
-
         model = genai.GenerativeModel(model_name)
-
         response = model.generate_content(prompt)
-
-        return response.text
-
+        return getattr(response, "text", str(response))
     except Exception as e:
-
-        return f"Error communicating with Gemini: {e}"
+        return f"AI call failed: {str(e)}"
 
 
 # =========================
@@ -194,10 +192,10 @@ def load_models():
 # Main App
 # =========================
 
-st.title("📊 CDP Score & Signal Predictor")
+st.title("CDP Score & Signal Predictor")
 
 # Create tabs
-tab1, tab2,tab3= st.tabs(["🔮 Prediction", "📋 Analysis","📊 Dashboard"])
+tab1, tab2,tab3= st.tabs(["Prediction", "Analysis","Dashboard"])
 
 with tab1:
     # Original prediction functionality
@@ -205,25 +203,25 @@ with tab1:
     if "_steps" not in st.session_state:
         init_steps()
     draw_stepper()
-    
+
     if "_bar" not in st.session_state:
         get_progress_bar()
-    
+
     try:
         reg_model, clf_model, scaler = load_models()
     except Exception as e:
-        st.error(f"❌ Model load failed: {e}")
+        st.error(f"Model load failed: {e}")
         st.stop()
-    
+
     uploaded_file = st.file_uploader("Upload cleaned CSV (with Partner_Code)", type=["csv"])
-    
+
     if uploaded_file:
         # Fresh run: reset steps + progress bar + redraw once
         init_steps()
         reset_progress_bar()
         draw_stepper()
         bar = get_progress_bar()
-        
+
         # Step 1: Load CSV
         try:
             set_step_status("Load CSV", "running")
@@ -233,8 +231,8 @@ with tab1:
             set_step_status("Load CSV", "ok"); bar.progress(20)
         except Exception as e:
             set_step_status("Load CSV", "fail")
-            st.error(f"⚠️ CSV load failed: {e}"); st.stop()
-        
+            st.error(f"CSV load failed: {e}"); st.stop()
+
         # Step 2: Scale Features
         try:
             set_step_status("Scale Features", "running")
@@ -245,8 +243,8 @@ with tab1:
             set_step_status("Scale Features", "ok"); bar.progress(40)
         except Exception as e:
             set_step_status("Scale Features", "fail")
-            st.error(f"⚠️ Scaling failed: {e}"); st.stop()
-        
+            st.error(f" Scaling failed: {e}"); st.stop()
+
         # Step 3: Predict Score
         try:
             set_step_status("Predict Score", "running")
@@ -254,8 +252,8 @@ with tab1:
             set_step_status("Predict Score", "ok"); bar.progress(60)
         except Exception as e:
             set_step_status("Predict Score", "fail")
-            st.error(f"⚠️ Score prediction failed: {e}"); st.stop()
-        
+            st.error(f" Score prediction failed: {e}"); st.stop()
+
         # Step 4: Predict Signal
         try:
             set_step_status("Predict Signal", "running")
@@ -265,26 +263,46 @@ with tab1:
             set_step_status("Predict Signal", "ok"); bar.progress(80)
         except Exception as e:
             set_step_status("Predict Signal", "fail")
-            st.error(f"⚠️ Signal prediction failed: {e}"); st.stop()
-        
+            st.error(f" Signal prediction failed: {e}"); st.stop()
+
         # Step 5: Build Output
         try:
             set_step_status("Build Output", "running")
-            results = id_cols.copy()
+            if 'Partner_Code' not in input_df.columns:
+                st.error(" Uploaded CSV must contain Partner_Code column.")
+                st.stop()
+            results = pd.DataFrame({'Partner_Code': input_df['Partner_Code']})
             results['Predicted Score'] = pred_score
             results['Predicted Signal'] = signal_labels
+            # === NEW: transactional enrichment ===
+            from cdp_utils import aggregate_transactional_features, apply_final_scoring
+
+            txn_df = pd.read_csv("partner_transactional_dataset.csv")
+            agg_df = aggregate_transactional_features(txn_df,partner_col="Partner_Code")
             
-            # Store results in session state for analysis tab
-            st.session_state['prediction_results'] = results
-            st.session_state['input_features'] = features_df_num
-            
+
+
+            final_results = apply_final_scoring(
+                results_df=results,
+                agg_df=agg_df,
+                partner_key="Partner_Code",
+                alpha=0.7
+            )
+
+            # Store enriched results in session state
+            st.session_state['prediction_results'] = final_results
+            st.session_state['input_features'] = agg_df
+
             set_step_status("Build Output", "ok"); bar.progress(100)
-            
-            st.success("✅ Prediction Complete!")
-            st.dataframe(results, use_container_width=True)
+
+            st.success(" Prediction Complete!")
+            st.dataframe(
+                final_results[['Partner_Code', 'Predicted Score', 'Predicted Signal', 'Final Score', 'Final Signal']],
+                use_container_width=True
+            )
             st.download_button(
-                "📥 Download Results",
-                data=results.to_csv(index=False),
+                "Download Results",
+                data=final_results.to_csv(index=False),
                 file_name="cdp_predictions.csv",
                 mime="text/csv"
             )
@@ -293,179 +311,228 @@ with tab1:
             st.error(f"⚠️ Building output failed: {e}")
     else:
         st.info("Upload a CSV to begin.")
-
+# ------------------------------
+# Tab 2: Signal Analysis & Reasoning
+# ------------------------------
 with tab2:
     st.header("🔍 Signal Analysis & Reasoning")
-    
-    # Check if predictions are available
-    if 'prediction_results' not in st.session_state:
+
+    # Ensure predictions exist
+    if 'prediction_results' not in st.session_state or st.session_state['prediction_results'] is None:
         st.info("Please run predictions in the Prediction tab first.")
     else:
-        # Partner selection for analysis
         results = st.session_state['prediction_results']
-        if not results.empty:
-            selected_partner = st.selectbox(
-                "Select Partner for Analysis", 
-                results['Partner_Code'].tolist()
-            )
-            
+        if results.empty:
+            st.info("No prediction results found. Please run the Prediction tab.")
+        else:
+            # prefer final columns if available
+            score_col = "Final Score" if "Final Score" in results.columns else "Predicted Score"
+            signal_col = "Final Signal" if "Final Signal" in results.columns else "Predicted Signal"
+
+            # partner selector
+            partner_list = results['Partner_Code'].tolist() if 'Partner_Code' in results.columns else results.index.astype(str).tolist()
+            selected_partner = st.selectbox("Select Partner for Analysis", partner_list)
+
+            def _get_partner_row(results_df, partner_code):
+                """Return partner row Series (robust)."""
+                try:
+                    return results_df[results_df['Partner_Code'] == partner_code].iloc[0]
+                except Exception:
+                    # fallback: try index match
+                    try:
+                        idx = results_df.index[results_df.index.astype(str) == partner_code][0]
+                        return results_df.loc[idx]
+                    except Exception:
+                        return results_df.iloc[0]
+
+            def _get_partner_kpis(feats_df, partner_code):
+                """Return partner-level KPI Series if available, else empty Series."""
+                if feats_df is None:
+                    return pd.Series(dtype="float64")
+                try:
+                    if 'Partner_Code' in feats_df.columns:
+                        tmp = feats_df[feats_df['Partner_Code'] == partner_code]
+                        if not tmp.empty:
+                            return tmp.iloc[0]
+                    # otherwise assume feats_df is indexed in same order as results; attempt ordinal alignment
+                    try:
+                        ridx = results[results['Partner_Code'] == partner_code].index[0]
+                        return feats_df.reset_index(drop=True).iloc[ridx]
+                    except Exception:
+                        return pd.Series(dtype="float64")
+                except Exception:
+                    return pd.Series(dtype="float64")
+
+            def _get_model_input_row():
+                """
+                Try a few common session_state keys for raw model input rows.
+                If you stored original input under a name, add it here.
+                """
+                for key in ("raw_input", "input_raw", "cdp_input", "input_features_raw"):
+                    if key in st.session_state and st.session_state[key] is not None:
+                        df = st.session_state[key]
+                        # try to match by Partner_Code
+                        try:
+                            if 'Partner_Code' in df.columns:
+                                tmp = df[df['Partner_Code'] == selected_partner]
+                                if not tmp.empty:
+                                    return tmp.iloc[0]
+                        except Exception:
+                            pass
+                return pd.Series(dtype="float64")
+
+            # When user clicks analyze
             if st.button("🔍 Analyze Signal Reasoning"):
-                
                 with st.spinner("Analyzing signal reasoning..."):
-                        # Get partner data
-                        partner_row = results[results['Partner_Code'] == selected_partner].iloc[0]
-                        partner_features = st.session_state['input_features'][
-                            st.session_state['input_features'].index == partner_row.name
-                        ].iloc[0]
-                        
-                        # Read reference documents
-                        docx_content = ""
-                        xlsx_content = ""
-                        
-                        docx_path = "Partner Onboarding & Credit Limit Approval Matrix (1).docx"
-                        xlsx_path = "CDP - Reasons for approval (2).xlsx"
-                        
-                        if os.path.exists(docx_path):
-                            docx_content = read_docx(docx_path)
-                        
-                        if os.path.exists(xlsx_path):
-                            xlsx_content = read_xlsx(xlsx_path)
-                        
-                        # Create analysis prompt
+                    try:
+                        prow = _get_partner_row(results, selected_partner)
+                        kpis = _get_partner_kpis(st.session_state.get('input_features'), selected_partner)
+                        model_input = _get_model_input_row()
+
+                        # choose KPI keys to include (order matters: highest value to show abnormal signals)
+                        candidate_kpis = [
+                            "avg_days_past_due","max_days_past_due","late_ratio",
+                            "dispute_ratio","adjustment_ratio","allocation_ratio","collection_rate",
+                            "total_invoices","total_installments","total_invoice_amount",
+                        ]
+                        # filter to existing columns and present values
+                        kpi_lines = []
+                        for k in candidate_kpis:
+                            if k in kpis.index:
+                                val = kpis.get(k)
+                                kpi_lines.append(f"- {k}: {val}")
+                        if not kpi_lines:
+                            kpi_lines = ["- (No transactional KPI snapshot available)"]
+
+                        # also include top model input numeric features (if available)
+                        input_lines = []
+                        if isinstance(model_input, pd.Series) and not model_input.empty:
+                            try:
+                                numeric_input = pd.to_numeric(model_input, errors="coerce").dropna()
+                                if not numeric_input.empty:
+                                    top_input = numeric_input.abs().nlargest(6)
+                                    for nm, v in top_input.items():
+                                        input_lines.append(f"- {nm}: {v}")
+                            except Exception:
+                                pass
+                        if not input_lines:
+                            input_lines = ["- (No raw CDP input snapshot available)"]
+
+                        # Build compact prompt
+                        final_score_str = f"{prow.get('Final Score', prow.get('Predicted Score', 'N/A')):.2f}" if pd.notna(prow.get('Final Score', prow.get('Predicted Score', np.nan))) else "N/A"
+                        final_signal_str = prow.get('Final Signal', prow.get('Predicted Signal', 'N/A'))
+
                         prompt = f"""
-You are a credit risk analyst. Analyze the following partner's CDP signal prediction and provide reasoning.
+You are a senior credit risk analyst. Provide a short, structured analysis for Partner {selected_partner}.
 
-Partner Code: {selected_partner}
-Predicted Score: {partner_row['Predicted Score']:.2f}
-Predicted Signal: {partner_row['Predicted Signal']}
+Context:
+- Final Score: {final_score_str}
+- Final Signal: {final_signal_str}
+- Model Predicted Score: {prow.get('Predicted Score', 'N/A')}
+- Model Predicted Signal: {prow.get('Predicted Signal', 'N/A')}
+- Override reason: {prow.get('OverrideReason', 'None')}
+- Adjustment delta: {prow.get('AdjustmentDelta', 'N/A')}
 
-Partner Features:
-{partner_features.to_string()}
+Top transactional KPIs (most relevant):
+{chr(10).join(kpi_lines)}
 
-Reference Documentation:
-=== Partner Onboarding & Credit Limit Approval Matrix ===
-{docx_content[:2000] if docx_content else "Document not found"}
+Top raw CDP input features (recent / largest):
+{chr(10).join(input_lines)}
 
-=== CDP Reasons for Approval ===
-{xlsx_content[:2000] if xlsx_content else "Document not found"}
+Requirements:
+1) Header: Top 3 Key Factors (bullets).
+2) Risk Assessment: 1-2 sentences explaining likelihood / urgency.
+3) Recommendation: Approve / Review / Decline with one-line justification.
+4) Quick Action Plan: 3 prioritized steps (1 line each).
 
-Please provide:
-1. Key factors that influenced this signal prediction
-2. Risk assessment based on the features
-3. Recommendations for this partner
-4. Reference to relevant approval criteria from the documents
-
-Keep the analysis concise and actionable.
+Return only Markdown with headings and bullets and keep it concise (max 200-300 words).
 """
-                        
-                        # Get analysis from Ollama
-                        analysis = analyze_with_gemini(prompt)
-                        
-                        # Display results
-                        col1, col2 = st.columns([1, 1])
-                        
+
+                        # Call AI if available
+                        if analyze_with_gemini is None:
+                            ai_text = "AI analysis not configured in this environment."
+                        else:
+                            try:
+                                ai_text = analyze_with_gemini(prompt)
+                            except Exception as e:
+                                ai_text = f"Error calling AI: {e}"
+
+                        # UI rendering
+                        col1, col2 = st.columns([1,1])
                         with col1:
-                            st.subheader("📊 Partner Summary")
+                            st.subheader("Partner Summary")
                             st.metric("Partner Code", selected_partner)
-                            st.metric("Predicted Score", f"{partner_row['Predicted Score']:.2f}")
-                            
-                            signal_color = {
-                                'Green': '🟢',
-                                'Yellow': '🟡', 
-                                'Red': '🔴'
-                            }
-                            st.metric(
-                                "Predicted Signal", 
-                                f"{signal_color.get(partner_row['Predicted Signal'], '⚪')} {partner_row['Predicted Signal']}"
-                            )
-                        
+                            fs_val = prow.get("Final Score", prow.get("Predicted Score", np.nan))
+                            st.metric("Final Score", f"{fs_val:.2f}" if pd.notna(fs_val) else "N/A")
+                            sig_val = prow.get("Final Signal", prow.get("Predicted Signal", "N/A"))
+                            signal_color = {'Green': '🟢', 'Yellow': '🟡', 'Red': '🔴'}
+                            st.metric("Final Signal", f"{signal_color.get(sig_val,'⚪')} {sig_val}")
+                            # small KPI snippet
+                            st.markdown("**Top transactional KPIs (snapshot)**")
+                            for line in kpi_lines[:6]:
+                                st.write(line)
+
                         with col2:
-                            st.subheader("🔍 Key Features")
-                            # Show top 5 features with highest values
-                            top_features = partner_features.abs().nlargest(5)
-                            for feature, value in top_features.items():
-                                st.write(f"**{feature}**: {value:.3f}")
-                        
-                        st.subheader("🧠 AI Analysis")
-                        st.markdown(analysis)
-                        
-                        # Document status
-                        st.subheader("📋 Reference Documents Status")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if docx_content:
-                                st.success("✅ Partner Onboarding Matrix loaded")
-                            else:
-                                st.warning("⚠️ Partner Onboarding Matrix not found")
-                        
-                        with col2:
-                            if xlsx_content:
-                                st.success("✅ CDP Reasons document loaded")
-                            else:
-                                st.warning("⚠️ CDP Reasons document not found")
+                            st.subheader(" Top Model Input Features")
+                            for line in input_lines[:6]:
+                                st.write(line)
 
-        # Batch analysis option
-        st.markdown("---")
-        st.subheader("📈 Batch Analysis")
-        confirm_batch = st.checkbox("I understand this will call Gemini for each partner in the batch and may incur costs.")
-        if st.button("🔄 Analyze All Red/Yellow Signals"):
-            if not GEMINI_API_KEY:
+                        st.markdown("###  AI Analysis")
+                        st.markdown(ai_text)
 
-                st.error("❌ No Gemini API key found in environment (GEMINI_API_KEY).")
+                    except Exception as e:
+                        st.error(f"Error while preparing analysis: {e}")
 
-                st.stop()
-            else:
-                high_risk = results[results['Predicted Signal'].isin(['Red', 'Yellow'])]
-                if len(high_risk) > 0:
-                    st.write(f"Found {len(high_risk)} partners with Red/Yellow signals:")
-                    
-                    analysis_results = []
-                    progress_bar = st.progress(0)
-                    
-                    for i, (idx, partner) in enumerate(high_risk.iterrows()):
-                        progress_bar.progress((i + 1) / len(high_risk))
-                        
-                        # Simple batch analysis prompt
-                        prompt = f"""
-As a credit risk analyst, briefly explain why Partner {partner['Partner_Code']} received a {partner['Predicted Signal']} signal with score {partner['Predicted Score']:.2f}.
-
-Provide exactly 3 bullet points:
-• Primary risk factor
-• Secondary concern  
-• Recommended action
-
-Keep each point under 25 words.
-"""
-                        
-                        analyze_with_gemini(prompt)
-                        analysis_results.append({
-                            'Partner_Code': partner['Partner_Code'],
-                            'Signal': partner['Predicted Signal'],
-                            'Score': partner['Predicted Score'],
-                            'Analysis': analysis[:200] + "..." if len(analysis) > 200 else analysis
-                        })
-                    
-                    # Display batch results
-                    batch_df = pd.DataFrame(analysis_results)
-                    st.dataframe(batch_df, use_container_width=True)
+            # Batch analysis option (careful: may incur API calls)
+            st.markdown("---")
+            st.subheader("Batch Analysis")
+            confirm_batch = st.checkbox("I understand this will call the AI for each partner and may incur costs.")
+            run_batch = st.button(" Analyze All Red/Yellow Signals")
+            if run_batch:
+                if not confirm_batch:
+                    st.info("Please confirm the checkbox before running batch analysis.")
+                
                 else:
-                    st.info("No Red or Yellow signals found in predictions.")
+                    signal_col = "Final Signal" if "Final Signal" in results.columns else "Predicted Signal"
+                    score_col = "Final Score" if "Final Score" in results.columns else "Predicted Score"
+                    high_risk = results[results[signal_col].isin(['Red','Yellow'])]
+                    if high_risk.empty:
+                        st.info("No Red/Yellow partners found.")
+                    else:
+                        progress = st.progress(0)
+                        batch_out = []
+                        for i, (_, partner) in enumerate(high_risk.iterrows()):
+                            try:
+                                partner_code = partner.get('Partner_Code', str(partner.name))
+                                prow = _get_partner_row(results, partner_code)
+                                kpis = _get_partner_kpis(st.session_state.get('input_features'), partner_code)
+                                # build short prompt (reuse same logic, but minimal to save tokens)
+                                kp_lines = []
+                                for k in ["late_ratio","avg_days_past_due","max_days_past_due","dispute_ratio","collection_rate"]:
+                                    if k in kpis.index:
+                                        kp_lines.append(f"- {k}: {kpis.get(k)}")
+                                if not kp_lines:
+                                    kp_lines = ["- (no kpi)"]
+                                prompt = f"Partner {partner_code} | Signal: {prow.get(signal_col)} | Score: {prow.get(score_col)}\nTop KPIs:\n" + "\n".join(kp_lines) + "\nProvide 3 bullets: primary risk, secondary concern, recommended action. Keep each <25 words."
+                                ai_resp = analyze_with_gemini(prompt)
+                                batch_out.append({
+                                    "Partner_Code": partner_code,
+                                    "Signal": prow.get(signal_col),
+                                    "Score": prow.get(score_col),
+                                    "Analysis": ai_resp if isinstance(ai_resp, str) else str(ai_resp)
+                                })
+                            except Exception as e:
+                                batch_out.append({
+                                    "Partner_Code": partner.get("Partner_Code", str(partner.name)),
+                                    "Signal": partner.get(signal_col),
+                                    "Score": partner.get(score_col),
+                                    "Analysis": f"Error: {e}"
+                                })
+                            progress.progress((i+1)/len(high_risk))
+                        st.dataframe(pd.DataFrame(batch_out), use_container_width=True)
 
-
-# after you run predictions and have:
-# st.session_state['prediction_results']  (DataFrame)
-# st.session_state['input_features']     (DataFrame)
-# and you already have analyze_with_gemini(prompt, model_name) function 
 
 with tab3:
-    # Run dashboard independently - it will let users upload CSV
-    # Optionally pass analyze_fn if you have analyze_with_gemini defined in your main file:
-    try:
-        analyze_fn = analyze_with_gemini  # if defined in your streamlit.py (Gemini)
-    except NameError:
-        analyze_fn = None
-
-   
     
     render_dashboard(
         prediction_results=st.session_state.get('prediction_results'),      # preferred
