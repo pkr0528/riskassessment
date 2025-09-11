@@ -19,10 +19,15 @@ from app.services.dashboard_service import render_dashboard
 from app.services.risk_analyser import analyze_with_gemini
 from app.utils.utils import STEP_NAMES
 
-# Load Env file
-load_dotenv()
-
 st.set_page_config(page_title="CDP Score & Signal Predictor", layout="wide")
+
+# Configure Gemini after Streamlit is initialized
+if settings.gemini_api_key:
+    settings.configure_gemini_with_streamlit()
+elif not settings.gemini_api_key:
+    st.info(
+        "💡 Tip: Set GEMINI_API_KEY environment variable to enable AI analysis features."
+    )
 
 # Custom CSS for Navigation Bar Style Tabs
 st.markdown(
