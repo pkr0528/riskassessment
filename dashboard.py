@@ -1,4 +1,3 @@
-# dashboard.py
 import os
 from typing import Optional, Callable, Tuple, Any
 import streamlit as st
@@ -62,7 +61,7 @@ def render_dashboard(
     input_features: Optional[pd.DataFrame] = None,
     analyze_fn: Optional[Callable[..., str]] = None,
     gemini_model_name: str = "gemini-2.5-flash",
-    use_upload: bool = False,           # <-- default: False (no uploader shown)
+    use_upload: bool = False,      # <-- default: False (no uploader shown)
 ):
     """
     Dynamic dashboard:
@@ -101,7 +100,7 @@ def render_dashboard(
     results = results.reset_index(drop=True)
 
     # ✅ Always prefer Final columns if available
-    score_col = "Final Score" 
+    score_col = "Final Score"
     signal_col = "Final Signal"
 
     # ----------- SECTION SELECTOR -----------
@@ -129,8 +128,8 @@ def render_dashboard(
         mean_score = results[score_col].mean() if score_col in results.columns else np.nan
 
         c1.metric(" Green (Safe)", f"{int(green)}")
-        c2.metric("Yellow (Watchlist)", f"{int(yellow)}")
-        c3.metric("Red (High Risk)", f"{int(red)}")
+        c2.metric(" Yellow (Watchlist)", f"{int(yellow)}")
+        c3.metric(" Red (High Risk)", f"{int(red)}")
         c4.metric("Mean Score", f"{mean_score:.2f}" if not np.isnan(mean_score) else "N/A")
         st.markdown("---")
 
@@ -196,130 +195,194 @@ def render_dashboard(
                 st.plotly_chart(fig_pie, use_container_width=True)
         st.markdown("---")
 
-    # ---------- Top risky / safe ----------
-        
+       # ---------- Top risky / safe ----------
     if show("Top Partners"):
         st.subheader("Top risky / safe partners")
         top_n = st.number_input("Top N entries", min_value=1, max_value=100, value=10)
 
-        # columns we want to display (prefer Final, fallback to Predicted)
-        display_cols = ["Partner_Code", score_col, signal_col]  # score_col and signal_col already set to Final*
-
-        # Ensure the columns exist in results; if not, fallback to predicted
-        missing = [c for c in display_cols if c not in results.columns]
-        if missing:
-            # try fallback to predicted columns if final not present
-            fallback_score = "Predicted Score"
-            fallback_signal = "Predicted Signal"
-            if fallback_score in results.columns and fallback_signal in results.columns:
-                display_cols = ["Partner_Code", fallback_score, fallback_signal]
-                st.warning(f"Final Score/Signal not found — showing {fallback_score}/{fallback_signal} instead.")
-            else:
-                # last resort: show Partner_Code and whatever numeric score exists
-                available_score = None
-                for candidate in ["Final Score","Predicted Score","PredictedScore"]:
-                    if candidate in results.columns:
-                        available_score = candidate
-                        break
-                available_signal = None
-                for candidate in ["Final Signal","Predicted Signal"]:
-                    if candidate in results.columns:
-                        available_signal = candidate
-                        break
-                display_cols = ["Partner_Code"]
-                if available_score: display_cols.append(available_score)
-                if available_signal: display_cols.append(available_signal)
-                st.warning("Showing best-available columns: " + ", ".join(display_cols[1:] or ["(none)"]))
-
-        # Compute top risky / safe based on score column if available
-        score_for_sort = None
-        for cand in [score_col, "Predicted Score", "Final Score", "PredictedScore"]:
-            if cand in results.columns:
-                score_for_sort = cand
-                break
-
-        if score_for_sort is not None:
-            # lower score = riskier (Final Score higher == safer). Keep same logic.
-            top_risk = results.sort_values(score_for_sort).head(top_n)[display_cols]
-            top_safe = results.sort_values(score_for_sort, ascending=False).head(top_n)[display_cols]
+        # prefer Final Score/Final Signal; if Final columns not present, warn and fallback to Predicted
+        if "Final Score" in results.columns and "Final Signal" in results.columns:
+            display_cols = ["Partner_Code", "Final Score", "Final Signal"]
+            score_for_sort = "Final Score"
+        elif "Predicted Score" in results.columns and "Predicted Signal" in results.columns:
+            display_cols = ["Partner_Code", "Predicted Score", "Predicted Signal"]
+            score_for_sort = "Predicted Score"
+            st.warning("Final Score/Signal not found — showing Predicted Score/Signal instead.")
         else:
-            # no numeric score available: just pick top N rows
-            top_risk = results.head(top_n)[display_cols]
-            top_safe = results.head(top_n)[display_cols]
+            # best-effort fallback
+            display_cols = [c for c in ["Partner_Code","Final Score","Predicted Score","Final Signal","Predicted Signal"] if c in results.columns]
+            score_for_sort = next((c for c in ["Final Score","Predicted Score"] if c in results.columns), None)
+            st.warning("Showing best-available columns.")
+
+        if score_for_sort:
+            top_risk = results[results[display_cols[2] if len(display_cols)>2 else display_cols[1]] == "Red"].sort_values(score_for_sort).head(top_n) if ("Final Signal" in results.columns or "Predicted Signal" in results.columns) else results.sort_values(score_for_sort).head(top_n)
+            top_safe = results[results[display_cols[2] if len(display_cols)>2 else display_cols[1]] == "Green"].sort_values(score_for_sort, ascending=False).head(top_n) if ("Final Signal" in results.columns or "Predicted Signal" in results.columns) else results.sort_values(score_for_sort, ascending=False).head(top_n)
+        else:
+            top_risk = results.head(top_n)
+            top_safe = results.head(top_n)
 
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Top Risk (Red)**")
-            st.dataframe(top_risk.reset_index(drop=True), use_container_width=True)
+            st.dataframe(top_risk.reset_index(drop=True)[display_cols], use_container_width=True)
         with c2:
             st.markdown("**Top Safe (Green)**")
-            st.dataframe(top_safe.reset_index(drop=True), use_container_width=True)
+            st.dataframe(top_safe.reset_index(drop=True)[display_cols], use_container_width=True)
         st.markdown("---")
 
 
-    # ---------- Inspect partner & AI insight ----------
+
+    # ---------- Inspect partner & AI insight  ----------
     if show("Inspect & AI Insight"):
         st.subheader("Inspect partner & get AI insight")
+
+        # partner selector (give a unique key to avoid collisions)
         partner_list = results['Partner_Code'].tolist() if 'Partner_Code' in results.columns else list(results.index.astype(str))
-        chosen = st.selectbox("Choose partner", partner_list)
+        chosen = st.selectbox("Choose partner", partner_list, key="dashboard_inspect_partner")
 
+        # get partner row from results (robust)
         try:
-            prow = results[results['Partner_Code']==chosen].iloc[0]
-            score_display = f"{prow.get(score_col,'N/A'):.2f}" if score_col in results.columns else "N/A"
-            st.markdown(f"**{chosen}** — Score: **{score_display}** — Signal: **{prow.get(signal_col,'N/A')}**")
+            prow = results[results['Partner_Code'] == chosen].iloc[0]
         except Exception:
-            st.write("Partner row not found or missing columns.")
-
-        feats_src = input_features if input_features is not None else features
-        if feats_src is not None:
+            # fallback to index-based selection
             try:
-                idx = results[results['Partner_Code']==chosen].index[0]
-                frecord = feats_src.reset_index(drop=True).iloc[idx]
-                st.markdown("**Top features for this partner**")
-                numeric_feats = pd.to_numeric(frecord, errors="coerce").dropna()
-                for f,v in numeric_feats.abs().nlargest(6).items():
-                    st.write(f"- **{f}**: {v:.3f}")
+                idx = results.index[results.index.astype(str) == chosen][0]
+                prow = results.loc[idx]
             except Exception:
-                pass
+                prow = results.iloc[0]
 
-        if analyze_fn is not None:
-            tone = st.selectbox("Tone of AI response", ["Concise","Analytical","Actionable"], index=2)
-            if st.button(" Get AI insight for selected partner"):
-                with st.spinner("Calling AI..."):
-                    feat_text = ""
+        # show minimal partner summary (no large feature lists)
+        try:
+            score_display = prow.get("Final Score", prow.get("Predicted Score", np.nan))
+            score_text = f"{score_display:.2f}" if pd.notna(score_display) else "N/A"
+        except Exception:
+            score_text = "N/A"
+        sig_text = prow.get("Final Signal", prow.get("Predicted Signal", "N/A"))
+        st.markdown(f"**{chosen}** — Score: **{score_text}** — Signal: **{sig_text}**")
+
+
+        # Gather transactional KPIs
+
+        kpis = pd.Series(dtype="float64")
+        if input_features is not None:
+            try:
+                if 'Partner_Code' in input_features.columns:
+                    tmp = input_features[input_features['Partner_Code'] == chosen]
+                    if not tmp.empty:
+                        kpis = tmp.iloc[0]
+                else:
+                    # ordinal fallback: align by results index
+                    idxs = results[results['Partner_Code'] == chosen].index
+                    if len(idxs) > 0:
+                        ridx = idxs[0]
+                        if ridx < len(input_features):
+                            kpis = input_features.reset_index(drop=True).iloc[ridx]
+            except Exception:
+                kpis = pd.Series(dtype="float64")
+
+        # -------------------------
+        # Gather original CDP input row (internal only)
+        # try few common session_state keys where you may have stored the uploaded CDP input
+        # -------------------------
+        partner_input_row = pd.Series(dtype="float64")
+        for key in ("cdp_input", "cdp_uploaded", "raw_input", "input_raw", "cdp_input_cleaned"):
+            if key in st.session_state and isinstance(st.session_state[key], pd.DataFrame):
+                df_input = st.session_state[key]
+                if "Partner_Code" in df_input.columns:
+                    tmp = df_input[df_input["Partner_Code"] == chosen]
+                    if not tmp.empty:
+                        partner_input_row = tmp.drop(columns=["Partner_Code"], errors="ignore").iloc[0]
+                        break
+
+        # -------------------------
+        # Helper: convert series -> readable lines (internal)
+        # -------------------------
+        def series_to_lines(s: pd.Series, keys: list, fmt="{:.2f}"):
+            lines = []
+            if s is None or s.empty:
+                return lines
+            for k in keys:
+                if k in s.index:
                     try:
-                        idx = results[results['Partner_Code']==chosen].index[0]
-                        if feats_src is not None:
-                            feat_text = feats_src.reset_index(drop=True).iloc[idx].to_string()
+                        lines.append(f"- {k}: {fmt.format(float(s.get(k)))}")
                     except Exception:
-                        feat_text = ""
+                        lines.append(f"- {k}: {s.get(k)}")
+            return lines
 
-                    prompt = f"""You are a senior credit risk analyst. Provide a structured, actionable analysis for Partner {chosen}.
-- {score_col}: {prow.get(score_col,'N/A')}
-- {signal_col}: {prow.get(signal_col,'N/A')}
-Partner features snapshot:
-{feat_text if feat_text else 'None'}
+        # KPI keys we care about (only those present will be used)
+        kpi_keys = ["avg_days_past_due", "max_days_past_due", "late_ratio",
+                    "dispute_ratio", "adjustment_ratio", "allocation_ratio",
+                    "collection_rate", "total_invoices", "total_installments",
+                    "total_invoice_amount"]
+        kpi_lines = series_to_lines(kpis, kpi_keys)
 
-Return:
-1) Key Factors (top 3)
-2) Risk Assessment (1-2 sentences)
-3) Clear Recommendation with one-line justification
-4) 3-step Quick Action Plan (prioritized)
-Format with headings and bullets. Tone: {tone}
+        # pick top numeric CDP input features (up to 6) for the prompt only
+        input_lines = []
+        if not partner_input_row.empty:
+            numeric_input = pd.to_numeric(partner_input_row, errors="coerce").dropna()
+            if not numeric_input.empty:
+                top_input = numeric_input.abs().nlargest(6)
+                for nm, v in top_input.items():
+                    input_lines.append(f"- {nm}: {v:.2f}")
+
+        # fallback text if missing (these are *only* used inside the prompt)
+        if not kpi_lines:
+            kpi_lines = ["- (no transactional KPI snapshot available)"]
+        if not input_lines:
+            input_lines = ["- (no CDP input snapshot available)"]
+
+        # -------------------------
+        # Build AI prompt (forces LLM to reference BOTH sources)
+        # -------------------------
+        final_score_str = f"{prow.get('Final Score', prow.get('Predicted Score', 'N/A')):.2f}" \
+            if pd.notna(prow.get('Final Score', prow.get('Predicted Score', np.nan))) else "N/A"
+        final_signal_str = prow.get('Final Signal', prow.get('Predicted Signal', 'N/A'))
+        predicted_score = prow.get('Predicted Score', 'N/A')
+        predicted_signal = prow.get('Predicted Signal', 'N/A')
+        override_reason = prow.get('OverrideReason', 'None')
+        adjustment_delta = prow.get('AdjustmentDelta', 'N/A')
+
+        # tone control + trigger
+        tone = st.selectbox("Tone of AI response", ["Concise", "Analytical", "Actionable"], index=1, key="dashboard_ai_tone")
+        if st.button("Get AI insight for selected partner", key="dashboard_ai_button"):
+            # compact prompt that includes both KPI and CDP input snippets (but those snippets are NOT shown in UI)
+            prompt = f"""
+You are a senior credit risk analyst. Provide a short structured analysis for Partner {chosen}.
+Tone: {tone}
+
+Context:
+- Final Score: {final_score_str}
+- Final Signal: {final_signal_str}
+- Model Predicted Score: {predicted_score}
+- Model Predicted Signal: {predicted_signal}
+- Override reason: {override_reason}
+- Adjustment delta: {adjustment_delta}
+
+Top Transactional KPIs:
+{chr(10).join(kpi_lines)}
+
+Top CDP input features:
+{chr(10).join(input_lines)}
+
+Requirements (keep concise, max ~180 words):
+1) Key Factors — 3 bullets referencing BOTH KPIs and CDP inputs (call out contradictions).
+2) Risk Assessment — 1–2 sentences summarizing urgency/likelihood.
+3) Recommendation — Approve / Review / Decline with one-line justification.
+Make sure the confidentiality maintain use the data whatever the data is needed for analysis but try not to reveal the data in the response.
 """
+            # call AI (analyze_fn is passed into render_dashboard)
+            if analyze_fn is None or not callable(analyze_fn):
+                ai_text = "AI analysis not configured in this environment."
+            else:
+                try:
+                    # analyze_fn(prompt, model_name)
+                    ai_text = analyze_fn(prompt, gemini_model_name)
+                except Exception as e:
+                    ai_text = f"Error calling AI: {e}"
 
-                    try:
-                        ai_text = analyze_fn(prompt, gemini_model_name)
-                    except Exception as e:
-                        ai_text = f"Error calling AI: {e}"
-                    st.subheader("AI Analysis")
-                    st.markdown(ai_text)
+            st.subheader("AI Analysis")
+            st.markdown(ai_text)
+
         st.markdown("---")
 
-    # ---------- Download results ----------
-    if show("Download Results"):
-        try:
-            download_df = viz_df if 'viz_df' in locals() else results
-        except Exception:
-            download_df = results
-        st.download_button("Download filtered results (CSV)", data=download_df.to_csv(index=False), file_name="dashboard_results.csv")
+
