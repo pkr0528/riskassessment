@@ -22,7 +22,7 @@ jobs:
       - name: Set up Python version
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Create and start virtual environment
         run: |
@@ -75,20 +75,13 @@ jobs:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
-          name: risk-assessment
+          name: risk-assessor-streamlit-${{ github.sha }}
 
-      - name: 'Deploy to Azure Web App'
+      - name: "Deploy to Azure Web App"
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
-          app-name: 'risk-assessor'
-          slot-name: 'Production'
+          app-name: "risk-assessor"
+          slot-name: "Production"
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B6F7DB93FA46441EB39D5E78098ECDCC }}
           package: .
-
-      - name: 'Set startup command'
-        uses: azure/CLI@v1
-        with:
-          azcliversion: 2.30.0
-          inlineScript: |
-            az webapp config set --resource-group assets-free --name risk-assessor --startup-file "python -m streamlit run app/main.py --server.port 8000 --server.address 0.0.0.0 --server.headless true"
