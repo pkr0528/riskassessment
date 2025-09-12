@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 
 import docx
 from openpyxl import load_workbook
-from dotenv import load_dotenv
 
 from app.core.config import settings
 from app.services.dashboard_service import render_dashboard
@@ -323,9 +322,7 @@ with tab1:
         st.error(f"Model load failed: {e}")
         st.stop()
 
-    uploaded_file = st.file_uploader(
-        "Upload cleaned CSV (with Partner_Code)", type=["csv"]
-    )
+    uploaded_file = st.file_uploader("Upload the data", type=["csv"])
 
     if uploaded_file:
         # Fresh run: reset steps + progress bar + redraw once
